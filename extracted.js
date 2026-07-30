@@ -1,0 +1,865 @@
+
+(function(){
+
+// ---------- Direct Financial Modeling Prep API access (own API key, no Cowork bridge) ----------
+const FMP_BASE = 'https://financialmodelingprep.com/stable/';
+function getApiKey(){ return (localStorage.getItem('fmpApiKey')||'').trim(); }
+function setApiKey(k){ localStorage.setItem('fmpApiKey', (k||'').trim()); }
+
+async function fmpGet(path, params){
+  const key = getApiKey();
+  if (!key) throw new Error('нет API-ключа — откройте ⚙ Настройки');
+  const url = new URL(FMP_BASE + path);
+  Object.entries(params||{}).forEach(([k,v])=>{ if (v!==undefined && v!==null && v!=='') url.searchParams.set(k, v); });
+  url.searchParams.set('apikey', key);
+  let res;
+  try{
+    res = await fetch(url.toString());
+  }catch(netErr){
+    throw new Error('сетевая ошибка / блокировка CORS — см. подсказку в Настройках');
+  }
+  if (!res.ok){
+    let msg = 'ошибка запроса (HTTP '+res.status+')';
+    try{ const j = await res.json(); if (j && (j['Error Message']||j.error)) msg = j['Error Message']||j.error; }catch(e){}
+    throw new Error(msg);
+  }
+  const data = await res.json();
+  if (data && data['Error Message']) throw new Error(data['Error Message']);
+  return data;
+}
+function first(arr){ return Array.isArray(arr) ? arr[0] : arr; }
+
+// ---------- Universe ----------
+const UNIVERSE = [
+  ['AAPL','Apple Inc.','Technology','stock'],
+  ['MSFT','Microsoft Corporation','Technology','stock'],
+  ['NVDA','NVIDIA Corporation','Technology','stock'],
+  ['GOOGL','Alphabet Inc.','Communication Services','stock'],
+  ['META','Meta Platforms, Inc.','Communication Services','stock'],
+  ['AMZN','Amazon.com, Inc.','Consumer Cyclical','stock'],
+  ['AVGO','Broadcom Inc.','Technology','stock'],
+  ['ORCL','Oracle Corporation','Technology','stock'],
+  ['CRM','Salesforce, Inc.','Technology','stock'],
+  ['AMD','Advanced Micro Devices, Inc.','Technology','stock'],
+  ['UNH','UnitedHealth Group Inc.','Healthcare','stock'],
+  ['JNJ','Johnson & Johnson','Healthcare','stock'],
+  ['LLY','Eli Lilly and Company','Healthcare','stock'],
+  ['PFE','Pfizer Inc.','Healthcare','stock'],
+  ['ABBV','AbbVie Inc.','Healthcare','stock'],
+  ['JPM','JPMorgan Chase & Co.','Financial Services','stock'],
+  ['BAC','Bank of America Corp.','Financial Services','stock'],
+  ['V','Visa Inc.','Financial Services','stock'],
+  ['MA','Mastercard Inc.','Financial Services','stock'],
+  ['GS','Goldman Sachs Group, Inc.','Financial Services','stock'],
+  ['TSLA','Tesla, Inc.','Consumer Cyclical','stock'],
+  ['HD','The Home Depot, Inc.','Consumer Cyclical','stock'],
+  ['MCD',"McDonald's Corporation",'Consumer Cyclical','stock'],
+  ['NKE','NIKE, Inc.','Consumer Cyclical','stock'],
+  ['COST','Costco Wholesale Corp.','Consumer Defensive','stock'],
+  ['WMT','Walmart Inc.','Consumer Defensive','stock'],
+  ['XOM','Exxon Mobil Corporation','Energy','stock'],
+  ['CVX','Chevron Corporation','Energy','stock'],
+  ['BA','The Boeing Company','Industrials','stock'],
+  ['CAT','Caterpillar Inc.','Industrials','stock'],
+  ['GE','GE Aerospace','Industrials','stock'],
+  ['DIS','The Walt Disney Company','Communication Services','stock'],
+  ['NFLX','Netflix, Inc.','Communication Services','stock'],
+  ['PLTR','Palantir Technologies Inc.','Technology','stock'],
+  ['COIN','Coinbase Global, Inc.','Financial Services','stock'],
+  ['SNOW','Snowflake Inc.','Technology','stock'],
+  ['ARM','Arm Holdings plc','Technology','stock'],
+  ['RIVN','Rivian Automotive, Inc.','Consumer Cyclical','stock'],
+  ['BIRK','Birkenstock Holding plc','Consumer Cyclical','stock'],
+  ['CART','Maplebear Inc. (Instacart)','Consumer Cyclical','stock'],
+  ['KVYO','Klaviyo, Inc.','Technology','stock'],
+  ['CAVA','CAVA Group, Inc.','Consumer Cyclical','stock'],
+  ['SPY','SPDR S&P 500 ETF Trust','Broad Market','etf'],
+  ['QQQ','Invesco QQQ Trust','Nasdaq-100','etf'],
+  ['VOO','Vanguard S&P 500 ETF','Broad Market','etf'],
+  ['VTI','Vanguard Total Stock Market ETF','Broad Market','etf'],
+  ['DIA','SPDR Dow Jones Industrial Avg ETF','Broad Market','etf'],
+  ['IWM','iShares Russell 2000 ETF','Small Cap','etf'],
+  ['XLK','Technology Select Sector SPDR','Sector','etf'],
+  ['XLE','Energy Select Sector SPDR','Sector','etf'],
+  ['XLF','Financial Select Sector SPDR','Sector','etf'],
+  ['GLD','SPDR Gold Shares','Commodity','etf'],
+  ['BTCUSD','Bitcoin','Crypto','crypto'],
+  ['ETHUSD','Ethereum','Crypto','crypto'],
+  ['SOLUSD','Solana','Crypto','crypto'],
+  ['XRPUSD','XRP','Crypto','crypto'],
+  ['DOGEUSD','Dogecoin','Crypto','crypto'],
+  ['ADAUSD','Cardano','Crypto','crypto']
+].map(x => ({symbol:x[0], name:x[1], sectorHint:x[2], type:x[3], data:null}));
+
+const IPO_SYMBOLS = new Set(['PLTR','COIN','SNOW','ARM','RIVN','BIRK','CART','KVYO','CAVA']);
+UNIVERSE.forEach(u => { u.isIPO = IPO_SYMBOLS.has(u.symbol); });
+
+let currentFilter = 'all';
+let sectorPerf = {}; // sector -> averageChange today
+
+// ---------- helpers ----------
+function fmtMoney(v, decimals){
+  if (v===undefined||v===null||isNaN(v)) return '—';
+  if (Math.abs(v) >= 1e12) return '$'+(v/1e12).toFixed(2)+'Т';
+  if (Math.abs(v) >= 1e9) return '$'+(v/1e9).toFixed(2)+'Млрд';
+  if (Math.abs(v) >= 1e6) return '$'+(v/1e6).toFixed(2)+'Млн';
+  return '$'+v.toFixed(decimals!==undefined?decimals:2);
+}
+function fmtPct(v, digits){
+  if (v===undefined||v===null||isNaN(v)) return '—';
+  digits = digits===undefined?1:digits;
+  return (v>0?'+':'')+v.toFixed(digits)+'%';
+}
+function pctClass(v){ if (v===undefined||v===null||isNaN(v)) return 'b-flat'; return v>0.05?'b-up':(v<-0.05?'b-down':'b-flat'); }
+function clamp(v,a,b){ return Math.max(a,Math.min(b,v)); }
+function scoreLabel(score){
+  if (score>=75) return {label:'Сильная покупка', cls:'strongbuy'};
+  if (score>=60) return {label:'Покупка', cls:'buy'};
+  if (score>=45) return {label:'Держать', cls:'hold'};
+  if (score>=30) return {label:'Продавать', cls:'sell'};
+  return {label:'Сильно продавать', cls:'strongsell'};
+}
+function riskLabel(n){
+  if (n<=1) return {label:'Низкий', cls:'buy'};
+  if (n<=3) return {label:'Средний', cls:'hold'};
+  if (n<=5) return {label:'Высокий', cls:'sell'};
+  return {label:'Очень высокий', cls:'strongsell'};
+}
+function todayISO(offsetDays){
+  const d = new Date();
+  d.setUTCDate(d.getUTCDate() - (offsetDays||0));
+  return d.toISOString().slice(0,10);
+}
+
+// ---------- Market pulse ----------
+async function loadPulse(){
+  const grid = document.getElementById('pulseGrid');
+  let html = '';
+  try{
+    const treasury = await fmpGet('treasury-rates', {});
+    const list = Array.isArray(treasury)?treasury:[];
+    if (list.length){
+      const latest = list[0];
+      const prior = list[19] || list[list.length-1];
+      const chg = prior ? (latest.year10 - prior.year10) : null;
+      html += `<div class="pulse-item"><div class="lbl">Доходность 10Y гособлигаций США</div>
+        <div class="val">${latest.year10}% ${chg!==null?`<span class="${chg>0?'down':'up'}" style="font-size:12px">(${chg>0?'+':''}${chg.toFixed(2)} за ~месяц)</span>`:''}</div></div>`;
+      html += `<div class="pulse-item"><div class="lbl">Краткая ставка (1 мес.)</div><div class="val">${latest.month1}%</div></div>`;
+    }
+  }catch(e){ html += `<div class="pulse-item err">Казначейские ставки недоступны</div>`; }
+
+  try{
+    let snap = null, d = 0;
+    for (d=0; d<7; d++){
+      try{
+        const r = await fmpGet('sector-performance-snapshot', {date: todayISO(d)});
+        if (Array.isArray(r) && r.length){ snap = r; break; }
+      }catch(e){ /* try earlier day */ }
+    }
+    if (snap){
+      sectorPerf = {};
+      snap.forEach(s => { sectorPerf[s.sector] = s.averageChange; });
+      const sorted = [...snap].sort((a,b)=>b.averageChange-a.averageChange);
+      const top = sorted[0], bot = sorted[sorted.length-1];
+      html += `<div class="pulse-item"><div class="lbl">Лидер сектора сегодня</div><div class="val up">${top.sector} ${fmtPct(top.averageChange)}</div></div>`;
+      html += `<div class="pulse-item"><div class="lbl">Аутсайдер сектора сегодня</div><div class="val down">${bot.sector} ${fmtPct(bot.averageChange)}</div></div>`;
+    } else {
+      html += `<div class="pulse-item err">Данные по секторам недоступны</div>`;
+    }
+  }catch(e){ html += `<div class="pulse-item err">Данные по секторам недоступны</div>`; }
+
+  try{
+    const er = await fmpGet('earnings-calendar', {from: todayISO(0), to: todayISO(-7), limit:10});
+    if (Array.isArray(er) && er.length){
+      const chips = er.slice(0,8).map(e=>e.symbol).join(', ');
+      html += `<div class="pulse-item" style="grid-column: span 2;"><div class="lbl">Крупные компании отчитываются в ближайшие 7 дней</div><div class="val" style="font-size:13px">${chips}</div></div>`;
+    }
+  }catch(e){}
+
+  try{
+    const gainers = await fmpGet('biggest-gainers', {});
+    if (Array.isArray(gainers) && gainers.length){
+      const top3 = gainers.slice(0,3).map(g=>`${g.symbol} ${fmtPct(g.changesPercentage)}`).join(' · ');
+      html += `<div class="pulse-item" style="grid-column: span 2;"><div class="lbl">Топ-3 растущих акции рынка сегодня</div><div class="val" style="font-size:13px">${top3}</div></div>`;
+    }
+  }catch(e){}
+
+  grid.innerHTML = html || '<div class="pulse-item err">Макро-данные недоступны</div>';
+}
+
+// ---------- Watchlist ----------
+function renderWatchTable(){
+  const q = document.getElementById('quickFilter').value.trim().toLowerCase();
+  const body = document.getElementById('watchBody');
+  const rows = UNIVERSE.filter(item => {
+    if (currentFilter==='ipo'){ if (!item.isIPO) return false; }
+    else if (currentFilter!=='all' && item.type!==currentFilter) return false;
+    if (q && !(item.symbol.toLowerCase().includes(q) || item.name.toLowerCase().includes(q))) return false;
+    return true;
+  });
+  body.innerHTML = rows.map(item => {
+    const d = item.data;
+    const typeLbl = item.type==='stock'?'Акция':(item.type==='etf'?'ETF':'Крипто');
+    if (!d){
+      return `<tr data-sym="${item.symbol}"><td><b>${item.symbol}</b></td><td>${item.name}</td><td><span class="badge b-type">${typeLbl}</span></td>
+        <td class="muted">—</td><td class="muted">—</td><td class="muted">—</td><td class="muted">—</td></tr>`;
+    }
+    const rangePos = (d.yearHigh>d.yearLow) ? clamp((d.price-d.yearLow)/(d.yearHigh-d.yearLow)*100,0,100) : 50;
+    const mom = momentumScore(d);
+    const momL = mom>=65?{l:'Растёт',c:'b-up'}:(mom<=35?{l:'Падает',c:'b-down'}:{l:'Нейтрально',c:'b-flat'});
+    return `<tr data-sym="${item.symbol}">
+      <td><b>${item.symbol}</b></td>
+      <td>${item.name}</td>
+      <td><span class="badge b-type">${typeLbl}</span></td>
+      <td>${fmtMoney(d.price)}</td>
+      <td><span class="badge ${pctClass(d.changePercentage)}">${fmtPct(d.changePercentage)}</span></td>
+      <td><div class="rangebar"><i style="left:${rangePos}%"></i></div> <span class="muted" style="font-size:11px">${rangePos.toFixed(0)}%</span></td>
+      <td><span class="badge ${momL.c}">${momL.l}</span></td>
+    </tr>`;
+  }).join('');
+  Array.from(body.querySelectorAll('tr')).forEach(tr=>{
+    tr.addEventListener('click', ()=> openDetail(tr.getAttribute('data-sym')));
+  });
+}
+
+function momentumScore(d){
+  let score = 50;
+  if (d.priceAvg50 && d.price>d.priceAvg50) score+=15; else if (d.priceAvg50) score-=15;
+  if (d.priceAvg50 && d.priceAvg200){ if (d.priceAvg50>d.priceAvg200) score+=10; else score-=10; }
+  if (d.yearHigh>d.yearLow){
+    const rp = (d.price-d.yearLow)/(d.yearHigh-d.yearLow)*100;
+    if (rp>=70) score+=10; else if (rp<=30) score-=10;
+  }
+  if (d.changePercentage>0) score+=5; else if (d.changePercentage<0) score-=5;
+  return clamp(score,0,100);
+}
+
+async function loadAllQuotes(){
+  const btn = document.getElementById('loadPricesBtn');
+  btn.disabled = true;
+  const progressEl = document.getElementById('loadProgress');
+  let done = 0;
+  const chunkSize = 15; // batch-quote (Premium+) handles many symbols in one request
+  for (let i=0;i<UNIVERSE.length;i+=chunkSize){
+    const chunk = UNIVERSE.slice(i,i+chunkSize);
+    try{
+      const r = await fmpGet('batch-quote', {symbols: chunk.map(c=>c.symbol).join(',')});
+      const bySymbol = {};
+      (Array.isArray(r)?r:[]).forEach(q=>{ if (q && q.symbol) bySymbol[q.symbol]=q; });
+      chunk.forEach(item=>{ item.data = bySymbol[item.symbol] || null; });
+    }catch(e){
+      // batch-quote requires Premium/Ultimate — fall back to per-symbol quote (works on any plan)
+      await Promise.all(chunk.map(async item=>{
+        try{ item.data = first(await fmpGet('quote', {symbol:item.symbol})); }
+        catch(e2){ item.data = null; }
+      }));
+    }
+    done += chunk.length;
+    progressEl.textContent = `Загружено ${done}/${UNIVERSE.length}…`;
+    renderWatchTable();
+  }
+  progressEl.textContent = `Готово: загружено ${done}/${UNIVERSE.length} инструментов.`;
+  btn.disabled = false;
+}
+
+// ---------- Detail analysis ----------
+const detailCache = {};
+
+async function openDetail(symbol){
+  document.getElementById('overlay').classList.add('open');
+  document.getElementById('modalBody').innerHTML = `<button class="close-btn" onclick="document.getElementById('overlay').classList.remove('open')">✕</button><div class="loading">Собираю данные по ${symbol}…</div>`;
+  try{
+    let result = detailCache[symbol];
+    if (!result){
+      result = await buildAnalysis(symbol);
+      detailCache[symbol] = result;
+    }
+    renderDetail(result);
+  }catch(e){
+    document.getElementById('modalBody').innerHTML = `<button class="close-btn" onclick="document.getElementById('overlay').classList.remove('open')">✕</button><p class="err">Не удалось получить данные для ${symbol}: ${e.message}</p>`;
+  }
+}
+
+function detectType(symbol){
+  const known = UNIVERSE.find(u=>u.symbol===symbol);
+  if (known) return known.type;
+  if (/USD$/.test(symbol) && symbol.length<=7) return 'crypto-guess';
+  return 'unknown';
+}
+
+async function buildAnalysis(symbol){
+  const known = UNIVERSE.find(u=>u.symbol===symbol);
+  let type = known ? known.type : null;
+
+  let quote=null, profile=null, priceTarget=null, grades=null, dcf=null, scores=null, ratios=null, income=null, filings=null;
+  let rsi=null, insiderStats=null, stockNews=null, etfInfo=null, etfHoldings=null, etfSectors=null;
+  let errors = [];
+
+  try{ quote = first(await fmpGet('quote', {symbol})); }catch(e){ errors.push('quote: '+e.message); }
+  const q = quote;
+  if (!q) throw new Error('тикер не найден в источнике данных (или неверный/просроченный API-ключ)');
+  if (!type){
+    // heuristic: crypto pairs are quoted as XXXUSD without a company profile
+    type = /USD$/.test(symbol) ? 'crypto' : 'stock';
+  }
+
+  if (type==='stock'){
+    try{ profile = first(await fmpGet('profile', {symbol})); }catch(e){ errors.push('profile'); }
+    try{ priceTarget = first(await fmpGet('price-target-consensus', {symbol})); }catch(e){ errors.push('price-target'); }
+    try{ grades = first(await fmpGet('grades-consensus', {symbol})); }catch(e){ errors.push('grades'); }
+    try{ dcf = first(await fmpGet('discounted-cash-flow', {symbol})); }catch(e){ errors.push('dcf'); }
+    try{ scores = first(await fmpGet('financial-scores', {symbol})); }catch(e){ errors.push('scores'); }
+    try{ ratios = first(await fmpGet('ratios', {symbol, limit:1})); }catch(e){ errors.push('ratios'); }
+    try{ income = await fmpGet('income-statement', {symbol, limit:2}); }catch(e){ errors.push('income'); }
+    try{ filings = await fmpGet('sec-filings-search/symbol', {symbol, from: todayISO(180), to: todayISO(0), limit:6}); }catch(e){ errors.push('filings'); }
+    try{ insiderStats = first(await fmpGet('insider-trading/statistics', {symbol})); }catch(e){ errors.push('insider-trading'); }
+    // if profile lookup succeeded and says it's actually an ETF/fund, reclassify
+    if (profile && (profile.isEtf || profile.isFund)) type = 'etf';
+  } else if (type==='etf'){
+    try{ profile = first(await fmpGet('profile', {symbol})); }catch(e){ errors.push('profile'); }
+    try{ etfInfo = first(await fmpGet('etf/info', {symbol})); }catch(e){ errors.push('etf-info'); }
+    try{ etfHoldings = await fmpGet('etf/holdings', {symbol}); }catch(e){ errors.push('etf-holdings'); }
+    try{ etfSectors = await fmpGet('etf/sector-weightings', {symbol}); }catch(e){ errors.push('etf-sectors'); }
+  }
+
+  // Technical indicator (RSI-14, daily) — available for stocks and ETFs, requires Starter+ plan
+  if (type==='stock' || type==='etf'){
+    try{
+      const rsiData = await fmpGet('technical-indicators/rsi', {symbol, periodLength:14, timeframe:'1day'});
+      rsi = first(rsiData);
+    }catch(e){ errors.push('rsi'); }
+  }
+
+  // Ticker-specific news — requires Starter+ plan
+  try{
+    const nres = await fmpGet('news/stock', {symbols: symbol, limit:6});
+    if (Array.isArray(nres) && nres.length) stockNews = nres;
+  }catch(e){ errors.push('news'); }
+
+  let nextEarnings = null;
+  if (type==='stock'){
+    try{
+      const er = await fmpGet('earnings', {symbol, limit:4});
+      if (Array.isArray(er)) nextEarnings = er.find(e => e.epsActual===null || e.epsActual===undefined) || null;
+    }catch(e){ errors.push('earnings'); }
+  }
+
+  return {symbol, type, quote:q, profile, priceTarget, grades, dcf, scores, ratios, income, filings, nextEarnings,
+    rsi, insiderStats, stockNews, etfInfo, etfHoldings, etfSectors, errors};
+}
+
+function computeScores(a){
+  const q = a.quote;
+  const mom = momentumScore(q);
+  let sectorAdj = 0;
+  if (a.profile && a.profile.sector && sectorPerf[a.profile.sector]!==undefined){
+    sectorAdj = clamp(sectorPerf[a.profile.sector]*4, -15, 15);
+  }
+  let rsiVal = null, rsiAdj = 0, rsiNote = '';
+  if (a.rsi && a.rsi.rsi!=null){
+    rsiVal = a.rsi.rsi;
+    if (rsiVal>=70){ rsiAdj=-8; rsiNote='перекуплен — риск отката'; }
+    else if (rsiVal>=60){ rsiAdj=-3; rsiNote='приближается к перекупленности'; }
+    else if (rsiVal<=30){ rsiAdj=8; rsiNote='перепродан — возможен отскок'; }
+    else if (rsiVal<=40){ rsiAdj=3; rsiNote='ближе к перепроданности'; }
+    else { rsiNote='нейтральная зона'; }
+  }
+  const shortScore = clamp(mom*0.6 + (50+sectorAdj)*0.3 + (50+rsiAdj)*0.1, 0, 100);
+
+  let valuation = 50, quality = 50, analystSc = 50, hasFundamentals = false;
+
+  if (a.type==='stock'){
+    hasFundamentals = true;
+    // Valuation
+    let v = 50;
+    if (a.priceTarget && a.priceTarget.targetConsensus && q.price){
+      const upside = (a.priceTarget.targetConsensus - q.price)/q.price*100;
+      v += clamp(upside, -30, 30)/30*20;
+    }
+    if (a.ratios && a.ratios.priceToEarningsGrowthRatio){
+      const peg = a.ratios.priceToEarningsGrowthRatio;
+      if (peg>0 && peg<1) v+=15; else if (peg>=1 && peg<1.5) v+=8; else if (peg>=1.5 && peg<2.5) v+=0; else if (peg>=2.5 && peg<4) v-=8; else if (peg>=4) v-=15;
+    }
+    if (a.dcf && a.dcf.dcf && q.price){
+      const fv = (a.dcf.dcf - q.price)/q.price*100;
+      v += clamp(fv, -60, 60)/60*10;
+    }
+    valuation = clamp(v,0,100);
+
+    // Quality
+    let qs = 0;
+    if (a.scores){
+      qs += (a.scores.piotroskiScore||0)/9*40;
+      const z = a.scores.altmanZScore;
+      if (z!==undefined){ if (z>2.99) qs+=30; else if (z>1.81) qs+=15; else qs+=0; }
+      else qs += 15;
+    } else qs += 25;
+    if (a.income && a.income.length){
+      const netMargin = a.income[0].netIncome/a.income[0].revenue;
+      if (netMargin>0.20) qs+=15; else if (netMargin>0.10) qs+=8; else if (netMargin>0) qs+=3; else qs-=10;
+      if (a.income.length>1){
+        const growth = (a.income[0].revenue - a.income[1].revenue)/a.income[1].revenue*100;
+        if (growth>15) qs+=15; else if (growth>5) qs+=8; else if (growth>0) qs+=3; else qs-=10;
+      }
+    }
+    quality = clamp(qs,0,100);
+
+    // Analyst
+    if (a.grades){
+      const g = a.grades;
+      const total = (g.strongBuy||0)+(g.buy||0)+(g.hold||0)+(g.sell||0)+(g.strongSell||0);
+      if (total>0){
+        const ratingVal = ((g.strongBuy||0)*5+(g.buy||0)*4+(g.hold||0)*3+(g.sell||0)*2+(g.strongSell||0)*1)/total;
+        analystSc = clamp((ratingVal-1)/4*100,0,100);
+      }
+    }
+  } else if (a.type==='etf'){
+    valuation = 50; quality = 50; analystSc = 50;
+  } else if (a.type==='crypto'){
+    valuation = null; quality = null; analystSc = null;
+  }
+
+  let longScore;
+  if (a.type==='stock'){
+    longScore = clamp(valuation*0.35 + quality*0.30 + analystSc*0.25 + (50+sectorAdj)*0.10, 0, 100);
+  } else if (a.type==='etf'){
+    longScore = clamp(mom*0.5 + (50+sectorAdj)*0.5, 0, 100);
+  } else {
+    longScore = clamp(mom, 0, 100); // crypto: momentum only, heavily caveated
+  }
+
+  // Risk
+  let riskN = 0;
+  if (a.profile && a.profile.beta!==undefined){
+    if (a.profile.beta>1.5) riskN+=2; else if (a.profile.beta>1.1) riskN+=1;
+  }
+  if (a.scores && a.scores.altmanZScore!==undefined){
+    if (a.scores.altmanZScore<1.81) riskN+=2; else if (a.scores.altmanZScore<2.99) riskN+=1;
+  }
+  if (a.ratios && a.ratios.debtToEquityRatio!==undefined && a.ratios.debtToEquityRatio>1.5) riskN+=1;
+  if (q.yearHigh && q.yearLow && q.yearLow>0){
+    const width = (q.yearHigh-q.yearLow)/q.yearLow*100;
+    if (width>60) riskN+=2; else if (width>35) riskN+=1;
+  }
+  if (a.type==='crypto') riskN += 3;
+  riskN = clamp(riskN,0,7);
+
+  return {mom, shortScore, valuation, quality, analystSc, longScore, riskN, hasFundamentals, sectorAdj, rsiVal, rsiNote};
+}
+
+// Renders whatever numeric/string fields an object has as key-value rows.
+// Used for endpoints whose exact field names can vary (insider stats, ETF info) —
+// degrades gracefully instead of showing "undefined" for a guessed field name.
+function renderKvsFromObject(obj, limit){
+  if (!obj || typeof obj!=='object') return '';
+  const skip = new Set(['symbol','date','cik']);
+  const entries = Object.entries(obj).filter(([k,v]) => v!==null && v!==undefined && typeof v!=='object' && !skip.has(k)).slice(0, limit||10);
+  if (!entries.length) return '';
+  return entries.map(([k,v])=>{
+    const label = k.replace(/([a-z])([A-Z])/g,'$1 $2').replace(/^./,c=>c.toUpperCase());
+    const val = (typeof v==='number' && Math.abs(v)>1000) ? fmtMoney(v) : (typeof v==='number' ? (Number.isInteger(v)?v:v.toFixed(2)) : v);
+    return `<div class="kv"><span class="k">${label}</span><span>${val}</span></div>`;
+  }).join('');
+}
+
+function renderDetail(a){
+  const q = a.quote;
+  const s = computeScores(a);
+  const shortLbl = scoreLabel(s.shortScore);
+  const longLbl = scoreLabel(s.longScore);
+  const risk = riskLabel(s.riskN);
+
+  let priceLevels = '';
+  if (a.type==='stock'){
+    const support = q.priceAvg50 || q.yearLow;
+    const stop = q.priceAvg200 ? q.priceAvg200*0.97 : q.yearLow;
+    const target = a.priceTarget ? a.priceTarget.targetConsensus : (a.dcf ? a.dcf.dcf : q.yearHigh);
+    priceLevels = `
+      <div class="kv"><span class="k">Зона накопления (около 50-дн. MA)</span><span>${fmtMoney(support)}</span></div>
+      <div class="kv"><span class="k">Ориентир по цели (консенсус аналитиков)</span><span>${fmtMoney(target)}</span></div>
+      <div class="kv"><span class="k">Ориентир стоп-уровня (200-дн. MA ×0.97)</span><span>${fmtMoney(stop)}</span></div>
+    `;
+  } else {
+    priceLevels = `
+      <div class="kv"><span class="k">Зона накопления (около 50-дн. MA)</span><span>${fmtMoney(q.priceAvg50)}</span></div>
+      <div class="kv"><span class="k">Сопротивление (52-нед. максимум)</span><span>${fmtMoney(q.yearHigh)}</span></div>
+      <div class="kv"><span class="k">Ориентир стоп-уровня (200-дн. MA ×0.97)</span><span>${fmtMoney(q.priceAvg200 ? q.priceAvg200*0.97 : q.yearLow)}</span></div>
+    `;
+  }
+
+  let fundBlock = '';
+  if (a.type==='stock'){
+    fundBlock = `
+      <div class="grid3">
+        <div class="metric"><div class="m-lbl">DCF справедливая стоимость</div><div class="m-val">${a.dcf?fmtMoney(a.dcf.dcf):'н/д'}</div>
+          <div class="muted" style="font-size:11px">${a.dcf?fmtPct((a.dcf.dcf-q.price)/q.price*100)+' к текущей цене':''}</div></div>
+        <div class="metric"><div class="m-lbl">Целевая цена (консенсус)</div><div class="m-val">${a.priceTarget?fmtMoney(a.priceTarget.targetConsensus):'н/д'}</div>
+          <div class="muted" style="font-size:11px">${a.priceTarget?('диапазон '+fmtMoney(a.priceTarget.targetLow)+' – '+fmtMoney(a.priceTarget.targetHigh)):''}</div></div>
+        <div class="metric"><div class="m-lbl">PEG / P/E</div><div class="m-val">${a.ratios && a.ratios.priceToEarningsGrowthRatio!=null? a.ratios.priceToEarningsGrowthRatio.toFixed(2):'н/д'} / ${a.ratios && a.ratios.priceToEarningsRatio!=null?a.ratios.priceToEarningsRatio.toFixed(1):'н/д'}</div></div>
+        <div class="metric"><div class="m-lbl">Piotroski F-Score</div><div class="m-val">${a.scores && a.scores.piotroskiScore!=null?a.scores.piotroskiScore+' / 9':'н/д'}</div></div>
+        <div class="metric"><div class="m-lbl">Altman Z-Score</div><div class="m-val">${a.scores && a.scores.altmanZScore!=null?a.scores.altmanZScore.toFixed(2):'н/д'}</div>
+          <div class="muted" style="font-size:11px">${a.scores && a.scores.altmanZScore!=null?(a.scores.altmanZScore>2.99?'безопасная зона':(a.scores.altmanZScore>1.81?'серая зона':'зона риска банкротства')):''}</div></div>
+        <div class="metric"><div class="m-lbl">Дивидендная доходность</div><div class="m-val">${a.ratios&&a.ratios.dividendYieldPercentage?a.ratios.dividendYieldPercentage.toFixed(2)+'%':'—'}</div></div>
+      </div>
+      <div style="margin-top:10px" class="grid2">
+        <div>
+          <h3>Рекомендации аналитиков</h3>
+          ${a.grades ? `<div class="kv"><span class="k">Strong Buy</span><span>${a.grades.strongBuy||0}</span></div>
+          <div class="kv"><span class="k">Buy</span><span>${a.grades.buy||0}</span></div>
+          <div class="kv"><span class="k">Hold</span><span>${a.grades.hold||0}</span></div>
+          <div class="kv"><span class="k">Sell</span><span>${a.grades.sell||0}</span></div>
+          <div class="kv"><span class="k">Strong Sell</span><span>${a.grades.strongSell||0}</span></div>
+          <div class="kv"><span class="k">Консенсус</span><span><b>${a.grades.consensus||'—'}</b></span></div>` : '<p class="muted">Данные недоступны</p>'}
+        </div>
+        <div>
+          <h3>Финансовые метрики</h3>
+          ${a.income&&a.income.length ? `<div class="kv"><span class="k">Выручка (посл. год)</span><span>${fmtMoney(a.income[0].revenue)}</span></div>
+          <div class="kv"><span class="k">Чистая прибыль</span><span>${fmtMoney(a.income[0].netIncome)}</span></div>
+          <div class="kv"><span class="k">Маржа чистой прибыли</span><span>${(a.income[0].netIncome/a.income[0].revenue*100).toFixed(1)}%</span></div>
+          ${a.income.length>1?`<div class="kv"><span class="k">Рост выручки г/г</span><span>${fmtPct((a.income[0].revenue-a.income[1].revenue)/a.income[1].revenue*100)}</span></div>`:''}` : '<p class="muted">Данные недоступны</p>'}
+          <div class="kv"><span class="k">Бета</span><span>${a.profile && a.profile.beta!=null?a.profile.beta:'—'}</span></div>
+          <div class="kv"><span class="k">Debt/Equity</span><span>${a.ratios && a.ratios.debtToEquityRatio!=null?a.ratios.debtToEquityRatio.toFixed(2):'—'}</span></div>
+          <div class="kv"><span class="k">Ближайшая отчётность</span><span>${a.nextEarnings?a.nextEarnings.date:'—'}</span></div>
+        </div>
+      </div>
+      <div style="margin-top:10px">
+        <h3>Инсайдерские сделки (руководство и директора)</h3>
+        ${a.insiderStats ? renderKvsFromObject(a.insiderStats, 10) : '<p class="muted">Недоступно на текущем тарифе источника данных (требуется план Starter и выше).</p>'}
+      </div>
+    `;
+  } else if (a.type==='etf'){
+    let etfBits = '';
+    if (a.etfInfo){
+      etfBits += `<div style="margin-top:8px"><h3>Информация о фонде</h3>${renderKvsFromObject(a.etfInfo, 10)}</div>`;
+    }
+    if (Array.isArray(a.etfSectors) && a.etfSectors.length){
+      const sorted = [...a.etfSectors].sort((x,y)=>(y.weightPercentage||y.weight||0)-(x.weightPercentage||x.weight||0)).slice(0,8);
+      etfBits += `<div style="margin-top:8px"><h3>Распределение по секторам</h3>` + sorted.map(s=>{
+        const sector = s.sector || s.industry || Object.values(s).find(v=>typeof v==='string') || '—';
+        let w = s.weightPercentage!=null?s.weightPercentage:(s.weight!=null?s.weight:null);
+        if (w!=null && Math.abs(w)<=1) w = w*100; // some feeds return fraction, not %
+        return `<div class="kv"><span class="k">${sector}</span><span>${w!=null?w.toFixed(1)+'%':'—'}</span></div>`;
+      }).join('') + `</div>`;
+    }
+    if (Array.isArray(a.etfHoldings) && a.etfHoldings.length){
+      const sorted = [...a.etfHoldings].sort((x,y)=>(y.weightPercentage||y.weight||0)-(x.weightPercentage||x.weight||0)).slice(0,10);
+      etfBits += `<div style="margin-top:8px"><h3>Топ-10 активов в составе фонда</h3>` + sorted.map(h=>{
+        const nm = h.name || h.asset || h.symbol || '—';
+        let w = h.weightPercentage!=null?h.weightPercentage:(h.weight!=null?h.weight:null);
+        if (w!=null && Math.abs(w)<=1) w = w*100;
+        return `<div class="kv"><span class="k">${h.asset?h.asset+' — ':''}${nm}</span><span>${w!=null?w.toFixed(2)+'%':'—'}</span></div>`;
+      }).join('') + `</div>`;
+    }
+    fundBlock = etfBits || `<p class="muted">Состав активов, сектора и holdings недоступны на текущем тарифном плане источника данных. Сигнал построен только на ценовом моментуме (50/200-дн. MA, RSI, позиция в 52-нед. диапазоне) и макро-фоне.</p>`;
+  } else {
+    fundBlock = `<p class="muted">У криптовалют нет традиционных фундаментальных показателей (P/E, DCF и т.д.). Сигнал основан только на моментуме и волатильности — риск всегда высокий/очень высокий.</p>`;
+  }
+
+  let filingsBlock = '';
+  if (a.filings && a.filings.length){
+    filingsBlock = `<h3>Последние SEC-отчёты</h3>` + a.filings.slice(0,6).map(f=>
+      `<a class="filing-link" href="${f.finalLink||f.link}" target="_blank" rel="noopener">${f.formType} · ${f.filingDate}</a>`
+    ).join('');
+  }
+
+  let newsBlock = '';
+  if (a.stockNews && a.stockNews.length){
+    newsBlock = `<h3 style="margin-top:14px">Новости по ${a.symbol}</h3>` + a.stockNews.slice(0,6).map(n=>
+      `<a class="filing-link" href="${n.url}" target="_blank" rel="noopener" style="white-space:normal">${n.title} <span class="muted" style="font-size:11px">— ${n.site||''}</span></a>`
+    ).join('');
+  }
+
+  const errNote = a.errors && a.errors.length ? `<p class="muted" style="font-size:11.5px">Недоступно на текущем тарифе источника данных: ${a.errors.join(', ')}.</p>` : '';
+
+  document.getElementById('modalBody').innerHTML = `
+    <button class="close-btn" onclick="document.getElementById('overlay').classList.remove('open')">✕</button>
+    <h1 style="margin-bottom:0">${a.symbol} <button id="myListToggleBtn" style="font-size:12px;vertical-align:middle">${myList.includes(a.symbol)?'✓ В списке — убрать':'★ Добавить в мой список'}</button></h1>
+    <p class="muted" style="margin-top:2px">${a.profile?a.profile.companyName:(a.type==='crypto'?'Криптовалюта':a.symbol)} ${a.profile?('· '+a.profile.sector+' · '+a.profile.industry):''}</p>
+    <div class="row" style="margin: 10px 0 16px">
+      <div class="metric" style="flex:1"><div class="m-lbl">Текущая цена</div><div class="m-val">${fmtMoney(q.price)} <span class="badge ${pctClass(q.changePercentage)}">${fmtPct(q.changePercentage)}</span></div></div>
+      <div class="metric" style="flex:1"><div class="m-lbl">52-нед. диапазон</div><div class="m-val" style="font-size:13px">${fmtMoney(q.yearLow)} — ${fmtMoney(q.yearHigh)}</div></div>
+      <div class="metric" style="flex:1"><div class="m-lbl">MA50 / MA200</div><div class="m-val" style="font-size:13px">${fmtMoney(q.priceAvg50)} / ${fmtMoney(q.priceAvg200)}</div></div>
+      <div class="metric" style="flex:1"><div class="m-lbl">RSI (14, дневной)</div><div class="m-val" style="font-size:13px">${s.rsiVal!=null?s.rsiVal.toFixed(0):'н/д'} ${s.rsiVal!=null?`<span class="muted" style="font-size:11px">(${s.rsiNote})</span>`:''}</div></div>
+    </div>
+
+    <div class="grid3" style="margin-bottom:16px">
+      <div class="verdict-card" style="background:var(--${shortLbl.cls==='strongbuy'?'strongbuy-bg':(shortLbl.cls==='buy'?'green-bg':(shortLbl.cls==='hold'?'amber-bg':(shortLbl.cls==='sell'?'sell-bg':'strongsell-bg')))})">
+        <div class="verdict-title">Краткосрочно (дни–недели)</div>
+        <div class="verdict-score">${shortLbl.label}</div>
+        <div class="muted" style="font-size:12px">Балл моментума: ${s.shortScore.toFixed(0)}/100</div>
+      </div>
+      <div class="verdict-card" style="background:var(--${longLbl.cls==='strongbuy'?'strongbuy-bg':(longLbl.cls==='buy'?'green-bg':(longLbl.cls==='hold'?'amber-bg':(longLbl.cls==='sell'?'sell-bg':'strongsell-bg')))})">
+        <div class="verdict-title">Долгосрочно (месяцы–годы)</div>
+        <div class="verdict-score">${longLbl.label}</div>
+        <div class="muted" style="font-size:12px">Композитный балл: ${s.longScore.toFixed(0)}/100</div>
+      </div>
+      <div class="verdict-card" style="background:#f2f4f8">
+        <div class="verdict-title">Уровень риска</div>
+        <div class="verdict-score">${risk.label}</div>
+        <div class="muted" style="font-size:12px">Бета, долг, волатильность, зона Z-Score</div>
+      </div>
+    </div>
+
+    <h3>Ориентировочные ценовые уровни</h3>
+    <div style="margin-bottom:16px">${priceLevels}</div>
+
+    <h3>Фундаментальные данные и оценка</h3>
+    ${fundBlock}
+
+    <div style="margin-top:16px">${filingsBlock}</div>
+    <div style="margin-top:16px">${newsBlock}</div>
+    ${errNote}
+    <p class="muted" style="margin-top:14px;font-size:11.5px">Не является индивидуальной инвестиционной рекомендацией. Проверяйте данные самостоятельно перед принятием решений.</p>
+  `;
+  const toggleBtn = document.getElementById('myListToggleBtn');
+  if (toggleBtn) toggleBtn.addEventListener('click', (ev)=>{
+    ev.stopPropagation();
+    if (myList.includes(a.symbol)) removeFromMyList(a.symbol); else addToMyList(a.symbol);
+    renderDetail(a);
+  });
+}
+
+// ---------- My List (user watchlist, persisted) ----------
+const MYLIST_KEY = 'mktAnalyzer_myList_v1';
+function loadMyListStorage(){ try{ return JSON.parse(localStorage.getItem(MYLIST_KEY)||'[]'); }catch(e){ return []; } }
+function saveMyListStorage(){ try{ localStorage.setItem(MYLIST_KEY, JSON.stringify(myList)); }catch(e){} }
+let myList = loadMyListStorage();
+
+function addToMyList(symbol){
+  symbol = (symbol||'').trim().toUpperCase();
+  if (!symbol) return;
+  if (!myList.includes(symbol)){ myList.push(symbol); saveMyListStorage(); }
+  renderMyList();
+}
+function removeFromMyList(symbol){
+  myList = myList.filter(s=>s!==symbol);
+  saveMyListStorage();
+  renderMyList();
+}
+
+async function renderMyList(){
+  const body = document.getElementById('myListBody');
+  const empty = document.getElementById('myListEmpty');
+  const status = document.getElementById('myListStatus');
+  if (!myList.length){ body.innerHTML=''; empty.style.display='block'; status.textContent=''; return; }
+  empty.style.display='none';
+  status.textContent = 'Обновляю данные…';
+  body.innerHTML = myList.map(sym=>`<tr id="mylist-row-${sym}"><td><b>${sym}</b></td><td colspan="8" class="muted">Загрузка…</td></tr>`).join('');
+  await Promise.all(myList.map(async sym=>{
+    const row = document.getElementById('mylist-row-'+sym);
+    try{
+      let result = detailCache[sym];
+      if (!result){ result = await buildAnalysis(sym); detailCache[sym] = result; }
+      const s = computeScores(result);
+      const q = result.quote;
+      const shortLbl = scoreLabel(s.shortScore);
+      const longLbl = scoreLabel(s.longScore);
+      const risk = riskLabel(s.riskN);
+      const upside = (result.priceTarget && result.priceTarget.targetConsensus) ? fmtPct((result.priceTarget.targetConsensus-q.price)/q.price*100) : '—';
+      const name = result.profile ? result.profile.companyName : sym;
+      if (row) row.innerHTML = `
+        <td><b>${sym}</b></td>
+        <td>${name}</td>
+        <td>${fmtMoney(q.price)}</td>
+        <td><span class="badge ${pctClass(q.changePercentage)}">${fmtPct(q.changePercentage)}</span></td>
+        <td><span class="badge b-${shortLbl.cls}">${shortLbl.label}</span></td>
+        <td><span class="badge b-${longLbl.cls}">${longLbl.label}</span></td>
+        <td><span class="badge b-${risk.cls}">${risk.label}</span></td>
+        <td>${upside}</td>
+        <td><button data-open="${sym}">Детали</button> <button data-remove="${sym}">✕</button></td>
+      `;
+    }catch(e){
+      if (row) row.innerHTML = `<td><b>${sym}</b></td><td colspan="8" class="err">Не удалось получить данные: ${e.message}</td>`;
+    }
+  }));
+  status.textContent = '';
+  Array.from(body.querySelectorAll('[data-open]')).forEach(btn=>btn.addEventListener('click', ()=>openDetail(btn.getAttribute('data-open'))));
+  Array.from(body.querySelectorAll('[data-remove]')).forEach(btn=>btn.addEventListener('click', ()=>removeFromMyList(btn.getAttribute('data-remove'))));
+}
+
+// ---------- General market news (requires Starter+ plan) ----------
+async function loadGeneralNews(){
+  const el = document.getElementById('newsList');
+  el.innerHTML = '<div class="loading">Загрузка новостей…</div>';
+  try{
+    const news = await fmpGet('news/general-latest', {page:0, limit:14});
+    if (!Array.isArray(news) || !news.length){ el.innerHTML = '<p class="muted">Новости недоступны — либо у источника нет свежих статей, либо это требует платного тарифа Starter и выше.</p>'; return; }
+    el.innerHTML = news.map(n=>`
+      <div style="padding:7px 0;border-bottom:1px solid var(--border)">
+        <a href="${n.url}" target="_blank" rel="noopener" style="font-weight:600;color:var(--text);text-decoration:none">${n.title}</a>
+        <div class="muted" style="font-size:11.5px;margin-top:2px">${n.site||''} ${n.publishedDate?('· '+n.publishedDate.slice(0,16).replace('T',' ')):''}</div>
+      </div>`).join('');
+  }catch(e){
+    el.innerHTML = `<p class="muted">Новости недоступны: ${e.message}</p>`;
+  }
+}
+
+// ---------- Live IPO calendar (requires Starter+ plan) ----------
+async function loadIpoCalendar(){
+  const body = document.getElementById('ipoCalBody');
+  body.innerHTML = '<tr><td colspan="7" class="loading">Загрузка…</td></tr>';
+  try{
+    const r = await fmpGet('ipos-calendar', {from: todayISO(30), to: todayISO(-60)}); // last 30 days .. next 60 days
+    const list = Array.isArray(r) ? r : [];
+    if (!list.length){ body.innerHTML = '<tr><td colspan="7" class="muted">Нет данных за этот период — либо сейчас затишье с IPO, либо эндпоинт требует платного тарифа Starter и выше.</td></tr>'; return; }
+    body.innerHTML = list.slice(0,40).map(x=>{
+      const date = x.date || x.ipoDate || '—';
+      const sym = x.symbol || x.ticker || '';
+      const company = x.company || x.companyName || x.name || '—';
+      const exch = x.exchange || '—';
+      const priceRange = x.priceRange || ((x.priceLow!=null && x.priceHigh!=null) ? (x.priceLow+'–'+x.priceHigh) : (x.priceLow||x.actions||'—'));
+      const shares = x.shares || x.sharesOffered || x.marketCap || '—';
+      return `<tr>
+        <td>${date}</td>
+        <td><b>${sym||'—'}</b></td>
+        <td>${company}</td>
+        <td>${exch}</td>
+        <td>${priceRange}</td>
+        <td>${shares}</td>
+        <td>${sym?`<button data-ipo-add="${sym}">★ В мой список</button>`:''}</td>
+      </tr>`;
+    }).join('');
+    Array.from(body.querySelectorAll('[data-ipo-add]')).forEach(btn=>{
+      btn.addEventListener('click', ()=>{ addToMyList(btn.getAttribute('data-ipo-add')); btn.textContent='✓ Добавлено'; btn.disabled=true; });
+    });
+  }catch(e){
+    body.innerHTML = `<tr><td colspan="7" class="muted">Календарь IPO недоступен: ${e.message} (обычно требует план Starter и выше).</td></tr>`;
+  }
+}
+
+// ---------- Market screener (requires Starter+ plan; searches whole FMP universe) ----------
+async function runScreener(){
+  const status = document.getElementById('scrStatus');
+  const body = document.getElementById('scrBody');
+  status.textContent = 'Ищу…';
+  body.innerHTML = '';
+  const sector = document.getElementById('scrSector').value;
+  const mcap = document.getElementById('scrMcap').value;
+  const sortBy = document.getElementById('scrSort').value;
+  try{
+    const params = {limit:25, isActivelyTrading:true};
+    if (sector) params.sector = sector;
+    if (mcap && Number(mcap)>0) params.marketCapMoreThan = mcap;
+    const r = await fmpGet('company-screener', params);
+    let list = Array.isArray(r) ? r : [];
+    if (sortBy==='marketCap') list.sort((a,b)=>(b.marketCap||0)-(a.marketCap||0));
+    else if (sortBy==='volume') list.sort((a,b)=>(b.volume||0)-(a.volume||0));
+    else if (sortBy==='price') list.sort((a,b)=>(b.price||0)-(a.price||0));
+    if (!list.length){ status.textContent='Ничего не найдено — попробуйте смягчить фильтры.'; return; }
+    body.innerHTML = list.map(x=>`
+      <tr data-sym="${x.symbol}">
+        <td><b>${x.symbol}</b></td>
+        <td>${x.companyName||'—'}</td>
+        <td>${x.sector||'—'}</td>
+        <td>${fmtMoney(x.price)}</td>
+        <td><span class="badge ${pctClass(x.changesPercentage||x.changePercentage)}">${fmtPct(x.changesPercentage||x.changePercentage)}</span></td>
+        <td>${fmtMoney(x.marketCap)}</td>
+        <td><button data-scr-add="${x.symbol}">★ В мой список</button> <button data-scr-open="${x.symbol}">Анализ</button></td>
+      </tr>`).join('');
+    status.textContent = `Найдено: ${list.length}`;
+    Array.from(body.querySelectorAll('[data-scr-add]')).forEach(btn=>{
+      btn.addEventListener('click', ()=>{ addToMyList(btn.getAttribute('data-scr-add')); btn.textContent='✓ Добавлено'; btn.disabled=true; });
+    });
+    Array.from(body.querySelectorAll('[data-scr-open]')).forEach(btn=>{
+      btn.addEventListener('click', ()=> openDetail(btn.getAttribute('data-scr-open')));
+    });
+  }catch(e){
+    status.textContent = `Скринер недоступен: ${e.message} (обычно требует план Starter и выше).`;
+  }
+}
+
+// ---------- wiring ----------
+document.getElementById('analyzeBtn').addEventListener('click', ()=>{
+  const v = document.getElementById('tickerInput').value.trim().toUpperCase();
+  document.getElementById('searchErr').textContent = '';
+  if (!v){ return; }
+  openDetail(v);
+});
+document.getElementById('tickerInput').addEventListener('keydown', (e)=>{ if (e.key==='Enter') document.getElementById('analyzeBtn').click(); });
+document.getElementById('loadPricesBtn').addEventListener('click', loadAllQuotes);
+document.getElementById('quickFilter').addEventListener('input', renderWatchTable);
+document.getElementById('overlay').addEventListener('click', (e)=>{ if (e.target.id==='overlay') e.target.classList.remove('open'); });
+Array.from(document.querySelectorAll('button.tab')).forEach(btn=>{
+  btn.addEventListener('click', ()=>{
+    Array.from(document.querySelectorAll('button.tab')).forEach(b=>b.classList.remove('active'));
+    btn.classList.add('active');
+    currentFilter = btn.getAttribute('data-filter');
+    document.getElementById('ipoNote').style.display = (currentFilter==='ipo') ? 'block' : 'none';
+    renderWatchTable();
+  });
+});
+document.getElementById('myListAddBtn').addEventListener('click', ()=>{
+  const inp = document.getElementById('myListInput');
+  if (inp.value.trim()){ addToMyList(inp.value); inp.value=''; }
+});
+document.getElementById('myListInput').addEventListener('keydown', (e)=>{ if (e.key==='Enter') document.getElementById('myListAddBtn').click(); });
+document.getElementById('myListRefreshBtn').addEventListener('click', ()=>{
+  myList.forEach(s=>{ delete detailCache[s]; });
+  renderMyList();
+});
+document.getElementById('newsRefreshBtn').addEventListener('click', loadGeneralNews);
+document.getElementById('scrRunBtn').addEventListener('click', runScreener);
+
+// ---------- Settings / API key ----------
+function refreshKeyUI(){
+  const key = getApiKey();
+  document.getElementById('noKeyBanner').style.display = key ? 'none' : 'block';
+  document.getElementById('apiKeyStatus').textContent = key ? ('Текущий ключ: •••'+key.slice(-4)) : 'Ключ не задан.';
+  document.getElementById('apiKeyInput').value = key;
+}
+document.getElementById('settingsBtn').addEventListener('click', ()=>{
+  document.getElementById('settingsOverlay').classList.add('open');
+  refreshKeyUI();
+});
+document.getElementById('settingsOverlay').addEventListener('click', (e)=>{ if (e.target.id==='settingsOverlay') e.target.classList.remove('open'); });
+document.getElementById('apiKeySaveBtn').addEventListener('click', ()=>{
+  setApiKey(document.getElementById('apiKeyInput').value);
+  refreshKeyUI();
+  Object.keys(detailCache).forEach(k=>delete detailCache[k]);
+  loadPulse();
+  renderMyList();
+  loadGeneralNews();
+  loadIpoCalendar();
+  document.getElementById('settingsOverlay').classList.remove('open');
+});
+
+function initApp(){
+  document.getElementById('tabAll').textContent = 'Все ('+UNIVERSE.length+')';
+  renderWatchTable();
+  refreshKeyUI();
+  loadPulse();
+  renderMyList();
+  loadGeneralNews();
+  loadIpoCalendar();
+}
+
+// ---------- Password lock (client-side gate so only you can open this page) ----------
+const LOCK_HASH = '23b501bc94ef4826df399518252f874a893fcae11f9f81216630e28bd085908f';
+const LOCK_KEY = 'invLockOk_v1';
+async function sha256Hex(str){
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
+  return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');
+}
+function showApp(){
+  document.getElementById('lockScreen').style.display = 'none';
+  document.getElementById('appRoot').style.display = 'block';
+  initApp();
+}
+document.getElementById('lockBtn').addEventListener('click', async ()=>{
+  const val = document.getElementById('lockPass').value;
+  const h = await sha256Hex(val);
+  const errEl = document.getElementById('lockErr');
+  if (h===LOCK_HASH){
+    try{ localStorage.setItem(LOCK_KEY,'1'); }catch(e){}
+    showApp();
+  } else {
+    errEl.style.display = 'block';
+    document.getElementById('lockPass').value='';
+  }
+});
+document.getElementById('lockPass').addEventListener('keydown', (e)=>{ if (e.key==='Enter') document.getElementById('lockBtn').click(); });
+try{
+  if (localStorage.getItem(LOCK_KEY)==='1') showApp();
+}catch(e){}
+
+})();
