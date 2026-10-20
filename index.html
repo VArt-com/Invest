@@ -318,7 +318,8 @@
 
 // ---------- Direct Financial Modeling Prep API access (own API key, no Cowork bridge) ----------
 const FMP_BASE = 'https://financialmodelingprep.com/stable/';
-function getApiKey(){ return (localStorage.getItem('fmpApiKey')||'').trim(); }
+const DEFAULT_API_KEY = 'LSzPoHXHplG2UX6hjwPOulZM5tmvLeuI';
+function getApiKey(){ return (localStorage.getItem('fmpApiKey')||DEFAULT_API_KEY).trim(); }
 function setApiKey(k){ localStorage.setItem('fmpApiKey', (k||'').trim()); }
 
 async function fmpGet(path, params){
