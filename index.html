@@ -1149,7 +1149,7 @@ function initApp(){
 }
 
 // ---------- Password lock (client-side gate so only you can open this page) ----------
-const LOCK_HASH = '480b96f46f8e9a4bb925139c5520897a82b277fd3f8ca8caec4c19abf2ca0fce';
+const LOCK_HASH = '9b033289d9291dffb9af6c5383fc0a836edded86c606c9381175d99e947cf88b';
 const LOCK_KEY = 'invLockOk_v1';
 async function sha256Hex(str){
   const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
