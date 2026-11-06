@@ -130,6 +130,15 @@
   .err { color: var(--red); font-size: 12.5px; }
   .spark { display:flex; gap:6px; flex-wrap:wrap; }
   .spark span { font-size: 12px; background:#f2f4f8; border-radius:6px; padding:3px 8px; }
+  .j-grid { display:grid; grid-template-columns: repeat(auto-fit,minmax(150px,1fr)); gap: 10px; }
+  .j-grid label { display:flex; flex-direction:column; gap:4px; font-size:11.5px; color: var(--text-dim); }
+  .j-grid input, .j-grid select {
+    border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 13px;
+    background:#fff; color: var(--text); min-width: 0; width: 100%;
+  }
+  #jTable tbody tr { cursor: default; }
+  #jTable button { padding: 4px 9px; font-size: 12px; }
+  @media (max-width: 640px) { .j-grid input, .j-grid select { font-size: 16px; padding: 10px; } }
 </style>
 </head>
 <body>
@@ -272,8 +281,46 @@
     </table></div>
   </div>
 
+  <div class="card" id="journalCard">
+    <h2>📒 Журнал сделок и контроль риска</h2>
+    <p class="subtitle" style="margin-top:-6px">Записывайте каждую сделку: приложение считает риск, результат после комиссий и налога и показывает честную статистику. Данные хранятся только в этом браузере — время от времени нажимайте «Скачать CSV» для резервной копии.</p>
+    <h3>Правила риска</h3>
+    <div class="j-grid">
+      <label>Корзина (капитал), $<input type="number" id="jCapital" min="0" step="any" inputmode="decimal" placeholder="например 10000"></label>
+      <label>Макс. риск на сделку, % корзины<input type="number" id="jMaxRisk" min="0" step="any" inputmode="decimal"></label>
+      <label>Налог с прибыли, %<input type="number" id="jTax" min="0" max="100" step="any" inputmode="decimal"></label>
+      <label>Комиссия за одну сторону, $<input type="number" id="jFee" min="0" step="any" inputmode="decimal"></label>
+    </div>
+    <h3 style="margin-top:16px">Новая сделка</h3>
+    <div class="j-grid">
+      <label>Тикер<input type="text" id="jSymbol" placeholder="AAPL" autocapitalize="characters" style="min-width:0"></label>
+      <label>Направление<select id="jDir"><option value="long">Лонг (покупка)</option><option value="short">Шорт</option></select></label>
+      <label>Цена входа<input type="number" id="jEntry" min="0" step="any" inputmode="decimal"></label>
+      <label>Стоп-лосс<input type="number" id="jStop" min="0" step="any" inputmode="decimal"></label>
+      <label>Количество, шт.<input type="number" id="jQty" min="0" step="any" inputmode="decimal"></label>
+      <label>Дата входа<input type="date" id="jDate"></label>
+    </div>
+    <div class="controls" style="margin-top:10px">
+      <button class="primary" id="jAddBtn">Добавить сделку</button>
+      <button id="jCsvBtn">Скачать CSV</button>
+    </div>
+    <p class="muted" id="jPreview" style="margin:0 0 6px;min-height:18px"></p>
+    <p class="err" id="jErr" style="margin:0 0 8px"></p>
+    <h3 style="margin-top:12px">Статистика</h3>
+    <div class="pulse-grid" id="jStats"></div>
+    <p class="muted" id="jStatsNote" style="font-size:12px;margin:8px 0 14px"></p>
+    <div class="table-scroll"><table id="jTable">
+      <thead>
+        <tr><th>Дата</th><th>Тикер</th><th>Напр.</th><th>Вход</th><th>Стоп</th><th>Шт.</th><th>Риск</th><th>Выход</th><th>Итог (после комиссий)</th><th>R</th><th></th></tr>
+      </thead>
+      <tbody id="jBody"></tbody>
+    </table></div>
+    <p class="muted" id="jEmpty" style="display:none;margin:8px 0 0">Сделок пока нет. Добавьте первую выше. «R» показывает результат в долях риска: +2R — прибыль вдвое больше риска, −1R — потеряли ровно то, чем рисковали.</p>
+  </div>
+
   <details class="methodology card">
     <summary>Как это считается — методика (открыть)</summary>
+    <p><b>Журнал сделок.</b> Риск сделки = |цена входа − стоп| × количество. Результат закрытой сделки = (выход − вход) × количество (для шорта наоборот) минус комиссия за обе стороны (сумма фиксируется в момент добавления сделки). Налог — ориентировочный: ставка применяется к общему итогу всех закрытых сделок, убытки уменьшают налогооблагаемую прибыль; реальный расчёт зависит от вашего счёта, года и валюты — уточняйте у бухгалтера или брокера. Статистика становится содержательной примерно от 30 закрытых сделок.</p>
     <p><b>Краткосрочный сигнал (дни–недели)</b> строится на моментуме: положение цены относительно 50- и 200-дневной скользящей средней, позиция в 52-недельном диапазоне, сегодняшняя динамика сектора и RSI(14) — индекс относительной силы (перекупленность/перепроданность). Отражает текущий тренд, а не гарантию движения.</p>
     <p><b>Долгосрочный сигнал (месяцы–годы)</b> — взвешенная комбинация: оценка стоимости (DCF-модель и PEG-коэффициент, 35%), качество бизнеса (Piotroski F-Score и Altman Z-Score, риск банкротства, рентабельность и рост выручки, 30%), консенсус аналитиков (целевая цена и рекомендации Buy/Hold/Sell, 25%), макро-фон (динамика сектора, доходность 10-летних гособлигаций, 10%).</p>
     <p><b>Уровень риска</b> — комбинация беты акции, зоны Altman Z-Score, долговой нагрузки (Debt/Equity) и ширины 52-недельного диапазона (волатильность).</p>
@@ -1141,6 +1188,226 @@ document.getElementById('apiKeySaveBtn').addEventListener('click', ()=>{
   document.getElementById('settingsOverlay').classList.remove('open');
 });
 
+// ---------- Trade journal (persisted in localStorage) ----------
+const JOURNAL_KEY = 'mktAnalyzer_journal_v1';
+const JOURNAL_CFG_KEY = 'mktAnalyzer_journalCfg_v1';
+function jLoad(key, fallback){
+  try{ const v = JSON.parse(localStorage.getItem(key)); return (v===null||v===undefined) ? fallback : v; }
+  catch(e){ return fallback; }
+}
+function jSave(key, val){ try{ localStorage.setItem(key, JSON.stringify(val)); }catch(e){} }
+let journal = jLoad(JOURNAL_KEY, []);
+if (!Array.isArray(journal)) journal = [];
+let jCfg = Object.assign({capital:0, maxRisk:1, tax:25, fee:0}, jLoad(JOURNAL_CFG_KEY, {}));
+
+function jEsc(s){
+  return String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function jNum(id){ const v = parseFloat(document.getElementById(id).value); return isFinite(v) ? v : NaN; }
+function jToday(){
+  const d = new Date();
+  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+}
+function jMoney(v){
+  if (v===null||v===undefined||!isFinite(v)) return '—';
+  const s = Math.abs(v).toLocaleString('en-US',{minimumFractionDigits:2, maximumFractionDigits:2});
+  return (v<0?'-':'')+'$'+s;
+}
+function jSigned(v){ return (isFinite(v)&&v>0?'+':'')+jMoney(v); }
+function jRisk(t){ return t.stop>0 ? Math.abs(t.entry - t.stop) * t.qty : NaN; }
+function jResult(t){
+  if (!(t.exit>0)) return NaN;
+  const gross = (t.dir==='short' ? (t.entry - t.exit) : (t.exit - t.entry)) * t.qty;
+  return gross - 2*(t.fee||0);
+}
+
+function jUpdatePreview(){
+  const el = document.getElementById('jPreview');
+  const entry = jNum('jEntry'), stop = jNum('jStop'), qty = jNum('jQty');
+  const cap = jCfg.capital, mr = jCfg.maxRisk;
+  el.style.color = '';
+  if (!(entry>0) || !(stop>0) || entry===stop){ el.textContent=''; return; }
+  const perShare = Math.abs(entry - stop);
+  const parts = [];
+  if (qty>0){
+    const risk = perShare * qty;
+    parts.push('Риск: '+jMoney(risk)+(cap>0 ? ' ('+(risk/cap*100).toFixed(2)+'% корзины)' : ''));
+    parts.push('позиция: '+jMoney(entry*qty));
+    if (cap>0 && mr>0 && risk/cap*100 > mr){ el.style.color = 'var(--red)'; }
+    if (cap>0 && entry*qty > cap){ parts.push('позиция больше корзины'); el.style.color = 'var(--red)'; }
+  }
+  if (cap>0 && mr>0){
+    const maxQty = Math.min(Math.floor(cap*mr/100/perShare), Math.floor(cap/entry));
+    parts.push('по лимиту '+mr+'% можно до '+Math.max(0,maxQty)+' шт.');
+  }
+  el.textContent = parts.join(' · ');
+}
+
+function jAddTrade(){
+  const err = document.getElementById('jErr');
+  err.textContent = '';
+  const symbol = document.getElementById('jSymbol').value.trim().toUpperCase();
+  const dir = document.getElementById('jDir').value === 'short' ? 'short' : 'long';
+  const entry = jNum('jEntry'), stopRaw = jNum('jStop'), qty = jNum('jQty');
+  const date = document.getElementById('jDate').value || jToday();
+  if (!symbol){ err.textContent = 'Укажите тикер.'; return; }
+  if (!(entry>0)){ err.textContent = 'Укажите цену входа больше нуля.'; return; }
+  if (!(qty>0)){ err.textContent = 'Укажите количество больше нуля.'; return; }
+  const stop = (isFinite(stopRaw) && stopRaw>0) ? stopRaw : 0;
+  if (stop){
+    if (dir==='long' && stop>=entry){ err.textContent = 'Для лонга стоп должен быть ниже цены входа.'; return; }
+    if (dir==='short' && stop<=entry){ err.textContent = 'Для шорта стоп должен быть выше цены входа.'; return; }
+  }
+  if (!stop){
+    if (!confirm('Стоп-лосс не указан — риск сделки посчитать нельзя. Добавить без стопа?')) return;
+  } else if (jCfg.capital>0 && jCfg.maxRisk>0){
+    const riskPct = Math.abs(entry - stop) * qty / jCfg.capital * 100;
+    if (riskPct > jCfg.maxRisk &&
+        !confirm('Риск сделки '+riskPct.toFixed(2)+'% корзины — выше вашего лимита '+jCfg.maxRisk+'%. Всё равно добавить?')) return;
+  }
+  journal.push({
+    id: Date.now().toString(36)+Math.random().toString(36).slice(2,6),
+    symbol, dir, entry, stop, qty, date, fee: jCfg.fee||0, exit: 0, exitDate: ''
+  });
+  jSave(JOURNAL_KEY, journal);
+  ['jSymbol','jEntry','jStop','jQty'].forEach(id=>{ document.getElementById(id).value=''; });
+  jUpdatePreview();
+  renderJournal();
+}
+
+function jCloseTrade(id){
+  const t = journal.find(x=>x.id===id);
+  if (!t) return;
+  const raw = prompt('Цена выхода для '+t.symbol+':');
+  if (raw===null) return;
+  const px = parseFloat(String(raw).replace(',','.'));
+  if (!(px>0)){ alert('Нужна цена больше нуля.'); return; }
+  t.exit = px;
+  t.exitDate = jToday();
+  jSave(JOURNAL_KEY, journal);
+  renderJournal();
+}
+function jDeleteTrade(id){
+  const t = journal.find(x=>x.id===id);
+  if (!t || !confirm('Удалить сделку '+t.symbol+' из журнала?')) return;
+  journal = journal.filter(x=>x.id!==id);
+  jSave(JOURNAL_KEY, journal);
+  renderJournal();
+}
+
+function renderJournal(){
+  const cap = jCfg.capital, mr = jCfg.maxRisk;
+  const closed = journal.filter(t=>t.exit>0);
+  const open = journal.filter(t=>!(t.exit>0));
+  const res = closed.map(jResult);
+  const wins = res.filter(r=>r>0), losses = res.filter(r=>r<0);
+  const sumWins = wins.reduce((a,b)=>a+b,0);
+  const sumLoss = losses.reduce((a,b)=>a+b,0);
+  const total = res.reduce((a,b)=>a+b,0);
+  const tax = total>0 ? total * (jCfg.tax||0) / 100 : 0;
+  const openRisk = open.map(jRisk).filter(isFinite).reduce((a,b)=>a+b,0);
+  const cls = v => v>0 ? 'up' : (v<0 ? 'down' : '');
+  const item = (lbl, val, c) => '<div class="pulse-item"><div class="lbl">'+lbl+'</div><div class="val '+(c||'')+'">'+val+'</div></div>';
+
+  let html = '';
+  html += item('Закрыто сделок', closed.length+(open.length ? ' <span class="muted" style="font-size:12px;font-weight:500">(открыто: '+open.length+')</span>' : ''));
+  if (closed.length){
+    const n = closed.length;
+    html += item('Доля прибыльных', (wins.length/n*100).toFixed(0)+'%');
+    html += item('Итого после комиссий', jSigned(total), cls(total));
+    html += item('Налог (оценка '+(jCfg.tax||0)+'%)', jMoney(-tax), tax>0 ? 'down' : '');
+    html += item('Чистыми после налога', jSigned(total-tax), cls(total-tax));
+    html += item('Средняя прибыль', wins.length ? jMoney(sumWins/wins.length) : '—', wins.length ? 'up' : '');
+    html += item('Средний убыток', losses.length ? jMoney(sumLoss/losses.length) : '—', losses.length ? 'down' : '');
+    html += item('Profit factor', sumLoss<0 ? (sumWins/Math.abs(sumLoss)).toFixed(2) : (sumWins>0 ? '∞' : '—'));
+    html += item('Среднее на сделку', jSigned(total/n), cls(total/n));
+  }
+  html += item('Риск открытых позиций', open.length ? (isFinite(openRisk)&&openRisk>0 ? jMoney(openRisk)+(cap>0 ? ' <span class="muted" style="font-size:12px;font-weight:500">('+(openRisk/cap*100).toFixed(2)+'%)</span>' : '') : '—') : '—');
+  document.getElementById('jStats').innerHTML = html;
+
+  const note = document.getElementById('jStatsNote');
+  if (!closed.length) note.textContent = 'Статистика появится после первой закрытой сделки.';
+  else if (closed.length < 30) note.textContent = 'Закрыто '+closed.length+' из ~30 сделок — до этого порога выводы по статистике ненадёжны, не меняйте стратегию по паре удачных или неудачных сделок.';
+  else note.textContent = '';
+
+  const body = document.getElementById('jBody');
+  const empty = document.getElementById('jEmpty');
+  if (!journal.length){ body.innerHTML = ''; empty.style.display = 'block'; return; }
+  empty.style.display = 'none';
+  body.innerHTML = journal.slice().reverse().map(t=>{
+    const risk = jRisk(t);
+    const r = jResult(t);
+    const riskPct = (cap>0 && isFinite(risk)) ? risk/cap*100 : NaN;
+    const over = isFinite(riskPct) && mr>0 && riskPct > mr;
+    const riskCell = isFinite(risk)
+      ? jMoney(risk)+(isFinite(riskPct) ? ' <span class="badge '+(over?'b-down':'b-flat')+'">'+riskPct.toFixed(2)+'%</span>' : '')
+      : '<span class="muted">без стопа</span>';
+    const resCell = isFinite(r) ? '<span class="'+cls(r)+'">'+jSigned(r)+'</span>' : '<span class="badge b-hold">Открыта</span>';
+    const rMult = (isFinite(r) && isFinite(risk) && risk>0) ? '<span class="'+cls(r)+'">'+(r>0?'+':'')+(r/risk).toFixed(2)+'R</span>' : '<span class="muted">—</span>';
+    const actions = (isFinite(r) ? '' : '<button data-act="close" data-id="'+jEsc(t.id)+'">Закрыть</button> ')
+      + '<button data-act="del" data-id="'+jEsc(t.id)+'" title="Удалить">✕</button>';
+    return '<tr>'
+      + '<td>'+jEsc(t.date)+'</td>'
+      + '<td><b>'+jEsc(t.symbol)+'</b></td>'
+      + '<td>'+(t.dir==='short'?'Шорт':'Лонг')+'</td>'
+      + '<td>'+jMoney(t.entry)+'</td>'
+      + '<td>'+(t.stop>0 ? jMoney(t.stop) : '—')+'</td>'
+      + '<td>'+jEsc(t.qty)+'</td>'
+      + '<td>'+riskCell+'</td>'
+      + '<td>'+(t.exit>0 ? jMoney(t.exit) : '—')+'</td>'
+      + '<td>'+resCell+'</td>'
+      + '<td>'+rMult+'</td>'
+      + '<td style="white-space:nowrap">'+actions+'</td>'
+      + '</tr>';
+  }).join('');
+}
+
+function jExportCsv(){
+  const q = c => '"'+String(c==null?'':c).replace(/"/g,'""')+'"';
+  const head = ['Дата входа','Тикер','Направление','Цена входа','Стоп','Количество','Комиссия за сторону','Цена выхода','Дата выхода','Результат после комиссий'];
+  const rows = journal.map(t=>{
+    const r = jResult(t);
+    return [t.date, t.symbol, t.dir, t.entry, t.stop||'', t.qty, t.fee||0, t.exit||'', t.exitDate||'', isFinite(r)?r.toFixed(2):''];
+  });
+  const csv = '﻿' + [head].concat(rows).map(r=>r.map(q).join(',')).join('\r\n');
+  const url = URL.createObjectURL(new Blob([csv], {type:'text/csv;charset=utf-8'}));
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'journal-'+jToday()+'.csv';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(()=>URL.revokeObjectURL(url), 1000);
+}
+
+function jInit(){
+  document.getElementById('jCapital').value = jCfg.capital || '';
+  document.getElementById('jMaxRisk').value = jCfg.maxRisk;
+  document.getElementById('jTax').value = jCfg.tax;
+  document.getElementById('jFee').value = jCfg.fee;
+  document.getElementById('jDate').value = jToday();
+  jUpdatePreview();
+  renderJournal();
+}
+[['jCapital','capital'],['jMaxRisk','maxRisk'],['jTax','tax'],['jFee','fee']].forEach(([id,key])=>{
+  document.getElementById(id).addEventListener('input', ()=>{
+    const v = jNum(id);
+    jCfg[key] = (isFinite(v) && v>=0) ? v : 0;
+    jSave(JOURNAL_CFG_KEY, jCfg);
+    jUpdatePreview();
+    renderJournal();
+  });
+});
+['jEntry','jStop','jQty'].forEach(id=>document.getElementById(id).addEventListener('input', jUpdatePreview));
+document.getElementById('jAddBtn').addEventListener('click', jAddTrade);
+document.getElementById('jCsvBtn').addEventListener('click', jExportCsv);
+document.getElementById('jBody').addEventListener('click', (e)=>{
+  const btn = e.target.closest('button[data-act]');
+  if (!btn) return;
+  if (btn.dataset.act==='close') jCloseTrade(btn.dataset.id);
+  else if (btn.dataset.act==='del') jDeleteTrade(btn.dataset.id);
+});
+
 function initApp(){
   document.getElementById('tabAll').textContent = 'Все ('+UNIVERSE.length+')';
   renderWatchTable();
@@ -1149,6 +1416,7 @@ function initApp(){
   renderMyList();
   loadGeneralNews();
   loadIpoCalendar();
+  jInit();
 }
 
 // ---------- Password lock (client-side gate so only you can open this page) ----------
