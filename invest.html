@@ -709,8 +709,173 @@ async function buildAnalysis(symbol){
     }catch(e){ errors.push('earnings'); }
   }
 
+  // Technical analysis from free end-of-day prices (also fills in RSI where the paid endpoint is unavailable)
+  let tech = null;
+  try{
+    tech = calcTech(await fmpGet('historical-price-eod/full', {symbol, from: todayISO(430), to: todayISO(0)}));
+    if (tech && tech.rsi!=null) errors = errors.filter(e => e!=='rsi');
+  }catch(e){ errors.push('history'); }
+
   return {symbol, type, quote:q, profile, priceTarget, grades, dcf, scores, ratios, income, filings, nextEarnings,
-    rsi, insiderStats, stockNews, etfInfo, etfHoldings, etfSectors, errors};
+    rsi, insiderStats, stockNews, etfInfo, etfHoldings, etfSectors, errors, tech};
+}
+
+// ---------- Technical analysis: computed in the browser from free end-of-day prices ----------
+function emaSeries(vals, n){
+  // EMA seeded with the SMA of the first n defined values; undefined (null) until then
+  const out = new Array(vals.length).fill(null);
+  const k = 2/(n+1);
+  let e = null, cnt = 0, sum = 0;
+  for (let i=0;i<vals.length;i++){
+    const v = vals[i];
+    if (v===null || v===undefined || isNaN(v)) continue;
+    if (e===null){ sum += v; cnt++; if (cnt===n){ e = sum/n; out[i] = e; } }
+    else { e = v*k + e*(1-k); out[i] = e; }
+  }
+  return out;
+}
+function calcTech(res){
+  const rowsRaw = Array.isArray(res) ? res : (res && Array.isArray(res.historical) ? res.historical : []);
+  const rows = rowsRaw.filter(r => r && r.close!=null && r.date).sort((a,b)=> a.date < b.date ? -1 : 1);
+  if (rows.length < 40) return null;
+  const close = rows.map(r=>+r.close), high = rows.map(r=>+(r.high!=null?r.high:r.close)), low = rows.map(r=>+(r.low!=null?r.low:r.close));
+  const vol = rows.map(r=>+(r.volume||0));
+  const n = rows.length, last = n-1;
+  const E20 = emaSeries(close,20), E50 = emaSeries(close,50), E200 = emaSeries(close,200);
+  const E12 = emaSeries(close,12), E26 = emaSeries(close,26);
+  const macdLine = close.map((_,i)=> (E12[i]!=null && E26[i]!=null) ? E12[i]-E26[i] : null);
+  const macdSig = emaSeries(macdLine, 9);
+  // RSI (Wilder, 14)
+  let rsi = null;
+  if (n > 15){
+    let g=0, l=0;
+    for (let i=1;i<=14;i++){ const d = close[i]-close[i-1]; if (d>=0) g+=d; else l-=d; }
+    let ag = g/14, al = l/14;
+    for (let i=15;i<n;i++){ const d = close[i]-close[i-1]; ag = (ag*13 + (d>0?d:0))/14; al = (al*13 + (d<0?-d:0))/14; }
+    rsi = al===0 ? 100 : 100 - 100/(1+ag/al);
+  }
+  // ATR (Wilder, 14)
+  let atr = null;
+  if (n > 15){
+    const tr = [];
+    for (let i=1;i<n;i++) tr.push(Math.max(high[i]-low[i], Math.abs(high[i]-close[i-1]), Math.abs(low[i]-close[i-1])));
+    let a = 0; for (let i=0;i<14;i++) a += tr[i]; a /= 14;
+    for (let i=14;i<tr.length;i++) a = (a*13 + tr[i])/14;
+    atr = a;
+  }
+  // volume vs the average of the previous 20 days
+  let volRatio = null;
+  if (n > 21){
+    let s = 0; for (let i=last-20;i<last;i++) s += vol[i];
+    const avg = s/20; if (avg>0) volRatio = vol[last]/avg;
+  }
+  const price = close[last];
+  const hist = (macdLine[last]!=null && macdSig[last]!=null) ? macdLine[last]-macdSig[last] : null;
+  const histPrev = (macdLine[last-1]!=null && macdSig[last-1]!=null) ? macdLine[last-1]-macdSig[last-1] : null;
+  return {n, date: rows[last].date, price, dayChg: price/close[last-1]-1,
+    rsi, ema20:E20[last], ema50:E50[last], ema200:E200[last],
+    macd: macdLine[last], macdSig: macdSig[last], macdHist: hist, macdHistPrev: histPrev,
+    atr, atrPct: atr ? atr/price*100 : null, volRatio};
+}
+function rsiText(v){
+  if (v>=70) return 'перекуплен — риск отката';
+  if (v>=60) return 'приближается к перекупленности';
+  if (v<=30) return 'перепродан — возможен отскок';
+  if (v<=40) return 'ближе к перепроданности';
+  return 'нейтральная зона';
+}
+// Transparent rule-based score: base 50, every rule adds or subtracts points
+function techScore(t){
+  const R = [], add = (txt,d)=>R.push([txt,d]);
+  const p = t.price;
+  if (t.ema20!=null && t.ema50!=null){
+    if (p>t.ema20 && t.ema20>t.ema50) add('Цена выше EMA20 и EMA50: восходящий тренд', 12);
+    else if (p<t.ema20 && t.ema20<t.ema50) add('Цена ниже EMA20 и EMA50: нисходящий тренд', -12);
+    else add('Тренд смешанный (цена между скользящими)', 0);
+  }
+  if (t.ema200!=null) (p>t.ema200) ? add('Цена выше EMA200 (долгосрочный тренд вверх)', 6) : add('Цена ниже EMA200 (долгосрочный тренд вниз)', -6);
+  if (t.rsi!=null){
+    const r = t.rsi.toFixed(0);
+    if (t.rsi>=75) add('RSI '+r+': сильная перекупленность, риск отката', -10);
+    else if (t.rsi>=65) add('RSI '+r+': сильный импульс, близко к перекупленности', 2);
+    else if (t.rsi>=45) add('RSI '+r+': здоровая зона для входа по тренду', 8);
+    else if (t.rsi>=30) add('RSI '+r+': слабый импульс', -4);
+    else add('RSI '+r+': перепроданность, возможен отскок, нужен разворотный сигнал', 2);
+  }
+  if (t.macdHist!=null && t.macdHistPrev!=null){
+    if (t.macdHist>0 && t.macdHist>t.macdHistPrev) add('MACD выше сигнальной и растёт', 8);
+    else if (t.macdHist>0) add('MACD выше сигнальной, импульс затухает', 3);
+    else if (t.macdHist<0 && t.macdHist<t.macdHistPrev) add('MACD ниже сигнальной и падает', -8);
+    else add('MACD ниже сигнальной, давление ослабевает', -2);
+  }
+  if (t.volRatio!=null && t.volRatio>=1.5){
+    t.dayChg>0 ? add('Аномальный объём ×'+t.volRatio.toFixed(1)+' от среднего за 20 дней на росте', 7)
+               : add('Аномальный объём ×'+t.volRatio.toFixed(1)+' от среднего за 20 дней на падении', -7);
+  }
+  if (t.atrPct!=null && t.atrPct>5) add('Очень высокая волатильность (ATR '+t.atrPct.toFixed(1)+'% цены)', -4);
+  const score = clamp(50 + R.reduce((s,x)=>s+x[1],0), 0, 100);
+  return {score, reasons:R};
+}
+// Stop = price - 2*ATR, target = price + 4*ATR (R/R 1:2); position size from the journal settings
+function tradePlan(t){
+  if (!t || !t.atr) return null;
+  const entry = t.price, stop = entry - 2*t.atr, target = entry + 4*t.atr, riskPS = entry - stop;
+  let qty = null, amount = null;
+  const cap = +jCfg.capital, mr = +jCfg.maxRisk;
+  if (cap>0 && mr>0 && riskPS>0){ amount = cap*mr/100; qty = Math.floor(amount/riskPS); }
+  return {entry, stop, target, riskPS, qty, amount};
+}
+function buildReportText(a, s){
+  const q = a.quote, t = a.tech, L = [];
+  const f = (v,d)=> (v==null||isNaN(v)) ? 'н/д' : Number(v).toFixed(d==null?2:d);
+  L.push('# Отчёт по '+a.symbol+(a.profile&&a.profile.companyName?' ('+a.profile.companyName+')':'')+' от '+todayISO(0), '');
+  L.push('## Задача для ИИ');
+  L.push('Ты опытный аналитик. Используй ТОЛЬКО данные ниже, не выдумывай цифры. Дай: 1) вывод для краткосрочной сделки (дни–недели): вход, стоп, цель, что отменяет идею; 2) вывод для долгосрочного инвестирования: что нравится и что настораживает; 3) главные риски; 4) итоговую рекомендацию (покупать / ждать / избегать) для каждого горизонта. Пиши по-русски, кратко, по пунктам. Это не персональная инвестиционная рекомендация.', '');
+  L.push('## Цена и рынок');
+  L.push('- Цена: '+f(q.price)+' ('+f(q.changePercentage)+'% за день), тип: '+a.type);
+  if (a.profile) L.push('- Сектор: '+(a.profile.sector||'н/д')+', отрасль: '+(a.profile.industry||'н/д')+', бета: '+f(a.profile.beta));
+  L.push('- 52 недели: '+f(q.yearLow)+' – '+f(q.yearHigh)+'; MA50/MA200: '+f(q.priceAvg50)+' / '+f(q.priceAvg200));
+  if (a.profile && sectorPerf[a.profile.sector]!==undefined) L.push('- Сектор сегодня: '+f(sectorPerf[a.profile.sector])+'%');
+  L.push('');
+  if (t){
+    L.push('## Технический анализ (дневные свечи, расчёт в программе)');
+    L.push('- RSI(14): '+f(t.rsi,1)+'; MACD: '+f(t.macd,3)+', сигнал: '+f(t.macdSig,3)+', гистограмма: '+f(t.macdHist,3));
+    L.push('- EMA20/50/200: '+f(t.ema20)+' / '+f(t.ema50)+' / '+f(t.ema200));
+    L.push('- ATR(14): '+f(t.atr)+' ('+f(t.atrPct,1)+'% цены); объём к среднему за 20 дней: ×'+f(t.volRatio,2), '');
+  }
+  if (a.type==='stock'){
+    L.push('## Фундамент');
+    if (a.ratios) L.push('- PEG: '+f(a.ratios.priceToEarningsGrowthRatio)+'; P/E: '+f(a.ratios.priceToEarningsRatio,1)+'; Debt/Equity: '+f(a.ratios.debtToEquityRatio));
+    if (a.dcf) L.push('- DCF справедливая стоимость: '+f(a.dcf.dcf));
+    if (a.priceTarget) L.push('- Целевая цена аналитиков: '+f(a.priceTarget.targetConsensus)+' (диапазон '+f(a.priceTarget.targetLow)+' – '+f(a.priceTarget.targetHigh)+')');
+    if (a.scores) L.push('- Piotroski: '+f(a.scores.piotroskiScore,0)+'/9; Altman Z: '+f(a.scores.altmanZScore));
+    if (a.income && a.income.length){
+      L.push('- Выручка: '+f(a.income[0].revenue,0)+'; чистая прибыль: '+f(a.income[0].netIncome,0));
+      if (a.income.length>1) L.push('- Рост выручки г/г: '+f((a.income[0].revenue-a.income[1].revenue)/a.income[1].revenue*100,1)+'%');
+    }
+    if (a.grades) L.push('- Аналитики: strong buy '+(a.grades.strongBuy||0)+', buy '+(a.grades.buy||0)+', hold '+(a.grades.hold||0)+', sell '+(a.grades.sell||0)+', strong sell '+(a.grades.strongSell||0));
+    if (a.nextEarnings) L.push('- Ближайшая отчётность: '+a.nextEarnings.date);
+    L.push('');
+  }
+  if (a.stockNews && a.stockNews.length){
+    L.push('## Свежие новости');
+    a.stockNews.slice(0,6).forEach(n=>L.push('- '+(n.publishedDate||'').slice(0,10)+' '+(n.title||'')));
+    L.push('');
+  }
+  L.push('## Оценка программы (правила прозрачны)');
+  L.push('- Краткосрок: '+scoreLabel(s.shortScore).label+' ('+s.shortScore.toFixed(0)+'/100); долгосрок: '+scoreLabel(s.longScore).label+' ('+s.longScore.toFixed(0)+'/100); риск: '+riskLabel(s.riskN).label);
+  if (s.tsc) s.tsc.reasons.forEach(r=>L.push('  - '+r[0]+' ('+(r[1]>0?'+':'')+r[1]+')'));
+  const p = tradePlan(t);
+  if (p) L.push('- План краткосрока: вход '+f(p.entry)+', стоп '+f(p.stop)+' (2×ATR), цель '+f(p.target)+' (R/R 1:2)'+(p.qty!=null?'; размер позиции ≈ '+p.qty+' шт. при риске '+f(jCfg.maxRisk)+'% корзины':''));
+  return L.join('\n');
+}
+async function copyText(text){
+  try{ await navigator.clipboard.writeText(text); return true; }
+  catch(e){
+    try{ const ta = document.createElement('textarea'); ta.value = text; ta.style.position='fixed'; ta.style.opacity='0';
+      document.body.appendChild(ta); ta.select(); const ok = document.execCommand('copy'); ta.remove(); return ok; }
+    catch(e2){ return false; }
+  }
 }
 
 function computeScores(a){
@@ -729,7 +894,10 @@ function computeScores(a){
     else if (rsiVal<=40){ rsiAdj=3; rsiNote='ближе к перепроданности'; }
     else { rsiNote='нейтральная зона'; }
   }
-  const shortScore = clamp(mom*0.6 + (50+sectorAdj)*0.3 + (50+rsiAdj)*0.1, 0, 100);
+  if (rsiVal==null && a.tech && a.tech.rsi!=null){ rsiVal = a.tech.rsi; rsiNote = rsiText(rsiVal); }
+  const tsc = a.tech ? techScore(a.tech) : null;
+  const shortScore = tsc ? clamp(mom*0.35 + (50+sectorAdj)*0.15 + tsc.score*0.5, 0, 100)
+                         : clamp(mom*0.6 + (50+sectorAdj)*0.3 + (50+rsiAdj)*0.1, 0, 100);
 
   let valuation = 50, quality = 50, analystSc = 50, hasFundamentals = false;
 
@@ -809,7 +977,7 @@ function computeScores(a){
   if (a.type==='crypto') riskN += 3;
   riskN = clamp(riskN,0,7);
 
-  return {mom, shortScore, valuation, quality, analystSc, longScore, riskN, hasFundamentals, sectorAdj, rsiVal, rsiNote};
+  return {mom, shortScore, valuation, quality, analystSc, longScore, riskN, hasFundamentals, sectorAdj, rsiVal, rsiNote, tsc};
 }
 
 // Renders whatever numeric/string fields an object has as key-value rows.
@@ -850,6 +1018,25 @@ function renderDetail(a){
       <div class="kv"><span class="k">Сопротивление (52-нед. максимум)</span><span>${fmtMoney(q.yearHigh)}</span></div>
       <div class="kv"><span class="k">Ориентир стоп-уровня (200-дн. MA ×0.97)</span><span>${fmtMoney(q.priceAvg200 ? q.priceAvg200*0.97 : q.yearLow)}</span></div>
     `;
+  }
+
+  let techBlock = '';
+  if (a.tech){
+    const t = a.tech, fx = (v,d)=> v==null ? '—' : v.toFixed(d==null?2:d);
+    const plan = tradePlan(t);
+    techBlock = `
+      <h3>Технический анализ (дневные свечи)</h3>
+      <div class="grid3" style="margin-bottom:8px">
+        <div class="metric"><div class="m-lbl">EMA 20 / 50 / 200</div><div class="m-val" style="font-size:13px">${fx(t.ema20)} / ${fx(t.ema50)} / ${fx(t.ema200)}</div></div>
+        <div class="metric"><div class="m-lbl">MACD (гистограмма)</div><div class="m-val" style="font-size:13px">${fx(t.macdHist,3)}</div>
+          <div class="muted" style="font-size:11px">${t.macdHist==null?'':(t.macdHist>0?'выше сигнальной':'ниже сигнальной')}</div></div>
+        <div class="metric"><div class="m-lbl">ATR (14) / объём к среднему</div><div class="m-val" style="font-size:13px">${fx(t.atr)} (${fx(t.atrPct,1)}%) / ×${fx(t.volRatio,1)}</div></div>
+      </div>
+      ${plan ? `<div class="kv"><span class="k">План: стоп (цена − 2×ATR)</span><span>${fmtMoney(plan.stop)}</span></div>
+      <div class="kv"><span class="k">План: цель (R/R 1:2)</span><span>${fmtMoney(plan.target)}</span></div>
+      <div class="kv"><span class="k">Размер позиции при вашем риске</span><span>${plan.qty!=null ? plan.qty+' шт. (риск $'+plan.amount.toFixed(0)+')' : 'укажите корзину и риск в журнале сделок'}</span></div>` : ''}
+      ${s.tsc ? `<div style="margin-top:6px">${s.tsc.reasons.map(r=>`<div class="kv"><span class="k">${r[0]}</span><span>${r[1]>0?'+':''}${r[1]}</span></div>`).join('')}</div>` : ''}
+      <p class="muted" style="font-size:11.5px;margin:4px 0 16px">Индикаторы считаются в программе по дневным ценам. Базовая оценка 50 баллов, каждое правило добавляет или отнимает баллы.</p>`;
   }
 
   let fundBlock = '';
@@ -940,6 +1127,7 @@ function renderDetail(a){
     <button class="close-btn" onclick="document.getElementById('overlay').classList.remove('open')">✕</button>
     <h1 style="margin-bottom:0">${a.symbol} <button id="myListToggleBtn" style="font-size:12px;vertical-align:middle">${myList.includes(a.symbol)?'✓ В списке — убрать':'★ Добавить в мой список'}</button></h1>
     <p class="muted" style="margin-top:2px">${a.profile?a.profile.companyName:(a.type==='crypto'?'Криптовалюта':a.symbol)} ${a.profile?('· '+a.profile.sector+' · '+a.profile.industry):''}</p>
+    <div style="margin:6px 0 10px"><button id="copyReportBtn">📋 Скопировать отчёт для Claude</button> <span id="copyReportMsg" class="muted" style="font-size:12px"></span></div>
     <div class="row" style="margin: 10px 0 16px">
       <div class="metric" style="flex:1"><div class="m-lbl">Текущая цена</div><div class="m-val">${fmtMoney(q.price)} <span class="badge ${pctClass(q.changePercentage)}">${fmtPct(q.changePercentage)}</span></div></div>
       <div class="metric" style="flex:1"><div class="m-lbl">52-нед. диапазон</div><div class="m-val" style="font-size:13px">${fmtMoney(q.yearLow)} — ${fmtMoney(q.yearHigh)}</div></div>
@@ -968,6 +1156,8 @@ function renderDetail(a){
     <h3>Ориентировочные ценовые уровни</h3>
     <div style="margin-bottom:16px">${priceLevels}</div>
 
+    ${techBlock}
+
     <h3>Фундаментальные данные и оценка</h3>
     ${fundBlock}
 
@@ -976,6 +1166,13 @@ function renderDetail(a){
     ${errNote}
     <p class="muted" style="margin-top:14px;font-size:11.5px">Не является индивидуальной инвестиционной рекомендацией. Проверяйте данные самостоятельно перед принятием решений.</p>
   `;
+  const copyBtn = document.getElementById('copyReportBtn');
+  if (copyBtn) copyBtn.addEventListener('click', async (ev)=>{
+    ev.stopPropagation();
+    const ok = await copyText(buildReportText(a, s));
+    const m = document.getElementById('copyReportMsg');
+    if (m) m.textContent = ok ? 'Скопировано. Вставьте в чат с Claude' : 'Не удалось скопировать';
+  });
   const toggleBtn = document.getElementById('myListToggleBtn');
   if (toggleBtn) toggleBtn.addEventListener('click', (ev)=>{
     ev.stopPropagation();
